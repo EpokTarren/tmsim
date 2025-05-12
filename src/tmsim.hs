@@ -3,6 +3,8 @@ import Control.Applicative
 import Control.Arrow
 import Control.Monad(void)
 import Data.Char(isAlphaNum)
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
 
 data Shift = L | R deriving(Show)
 data TuringMachine state symbol = TuringMachine {
@@ -66,6 +68,8 @@ data Error i
   | Expected i i
   | ExpectedSymbol i
   | EarlyEndOfInput [i]
+  | Redefinition String
+  | Missing String
   | Empty
   deriving (Eq, Show)
 
@@ -194,8 +198,8 @@ comma = ws <* char ',' <* ws
 alphaNum :: Parser Char String
 alphaNum = predicateString isAlphaNum
 
-newtype State = State String deriving(Show)
-newtype Symbol = Symbol String deriving(Show)
+newtype State = State String deriving(Show, Eq, Ord)
+newtype Symbol = Symbol String deriving(Show, Eq, Ord)
 data Statement
     = States     [State]
     | Alphabet   [Symbol]
@@ -283,6 +287,81 @@ statements = Parser $ \input -> case list' statement input of
     (xs, [])    -> Right (xs, [])
     (_, input') -> Left $ EarlyEndOfInput input'
 
+chain :: Parser a [b] -> Parser b c -> [a] -> Either (Either (Error a) (Error b)) (c, [b])
+chain l r s = case runParser l s of
+     Left  err     -> Left $ Left err
+     Right (s', _) -> left Right $ runParser r s'
+
+tm :: Parser Statement (TuringMachine State Symbol)
+tm = do
+    states <- tm' "states" $ \case
+        States states -> Just states
+        _             -> Nothing
+
+    alphabet <- tm' "alphabet" $ \case
+        Alphabet alphabet -> Just alphabet
+        _                 -> Nothing
+
+    blank  <- tm'' $ \case
+        Blank blank -> Just blank
+        _            -> Nothing
+
+    input <- tm' "input" $ \case
+        Input input -> Just input
+        _           -> Nothing
+
+    initial  <- tm'' $ \case
+        Initial initial -> Just initial
+        _               -> Nothing
+
+    accepting <- tm' "accepting" $ \case
+        Accepting accepting -> Just accepting
+        _                   -> Nothing
+
+    transitions <- tmTransitions
+
+    return TuringMachine {
+            state      = fromMaybe (head states) initial,
+            blank      = fromMaybe (head alphabet) blank,
+            final      = accepting,
+            input      = input,
+            transition = curry (`Map.lookup` transitions)
+        }
+
+tm' :: String -> (a -> Maybe b) -> Parser a b
+tm' s f = Parser $ \input -> case findMap f input of
+    (Just x, input') -> Right (x, input')
+    (Nothing, _    ) -> Left $ Missing s
+
+tm'' :: (a -> Maybe b) -> Parser a (Maybe b)
+tm'' f = Parser $ Right . findMap f
+
+tmTransitions :: Parser Statement (Map.Map (State, Symbol) (State, Symbol, Shift))
+tmTransitions = Parser $ \input -> case list' tmTransition input of
+        (xs, [])    -> Right (Map.fromList xs, [])
+        (_, input') -> Left $ l (runParser tmTransition input')
+    where
+        l (Left a) = a
+
+tmTransition :: Parser Statement ((State, Symbol), (State, Symbol, Shift))
+tmTransition = Parser f
+    where
+        f (Transition i o : s) = Right ((i, o), s)
+        f (States _       : _) = Left $ Redefinition "states"
+        f (Alphabet _     : _) = Left $ Redefinition "alphabet"
+        f (Blank _        : _) = Left $ Redefinition "blank"
+        f (Input _        : _) = Left $ Redefinition "input"
+        f (Initial _      : _) = Left $ Redefinition "initial"
+        f (Accepting _    : _) = Left $ Redefinition "accepting"
+        f [                  ] = Left Empty
+
+findMap :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
+findMap _ [] = (Nothing, [])
+findMap f (x:xs) = case f x of
+    Just x' -> (Just x', xs)
+    Nothing -> let (x', xs') = findMap f xs in (x', x:xs')
+
 main = do
     content <- getContents
-    print $ runParser statements content
+    let t = (statements `chain` tm) content
+    print $ right (\(t, _) -> snd (run t blankTape 10000000)) t
