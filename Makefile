@@ -1,17 +1,17 @@
 tmsim:
-	ghc -outputdir build -o build/tmsim -O2 src/*.hs
+	ghc -outputdir build -o tmsim -O2 tmsim.hs
 
+run: tmsim
+	tmsim
 
 ifeq ($(OS),Windows_NT)
 clean:
-	rmdir /S /Q build
-
-run: tmsim
-	build\tmsim.exe
+	if exist build     (rmdir /S /Q build)
+	if exist tmsim     (del tmsim)
+	if exist tmsim.exe (del tmsim.exe)
 else
 clean:
-	rm -r build
-
-run: tmsim
-	./build/tmsim
+	[ -e build     ] && rm -r build  || 0
+	[ -e tmsim     ] && rm tmsim     || 0
+	[ -e tmsim.exe ] && rm tmsim.exe || 0
 endif
