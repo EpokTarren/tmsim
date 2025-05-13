@@ -1,12 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
 import Control.Applicative
 import Control.Arrow
-import Control.Monad(void)
+import Control.Monad(void, when)
 import Data.Char(isAlphaNum)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.List (find)
 import System.Exit
+import Text.Read (readMaybe)
+import System.Environment
 
 data Shift = L | R deriving(Show)
 data TuringMachine state symbol = TuringMachine {
@@ -395,9 +397,108 @@ findMap f (x:xs) = case f x of
     Just x' -> (Just x', xs)
     Nothing -> let (x', xs') = findMap f xs in (x', x:xs')
 
+data Arg
+    = Help
+    | File       String
+    | TapeFile   String
+    | Iterations Int deriving(Eq)
+
+data ArgError
+    = UnknownArgument  String
+    | MissingArgument  String
+    | InvalidIteration String
+
+argP :: [String] -> Either ArgError (Arg, [String])
+
+argP ("-h":ss)     = Right (Help, ss)
+argP ("--help":ss) = Right (Help, ss)
+
+argP ("-i":f:ss)      = Right (File f, ss)
+argP ("--input":f:ss) = Right (File f, ss)
+argP ("-i":ss)        = Left $ MissingArgument "input"
+argP ("--input":ss)   = Left $ MissingArgument "input"
+
+argP ("-t":f:ss)     = Right (TapeFile f, ss)
+argP ("--tape":f:ss) = Right (TapeFile f, ss)
+argP ("-t":ss)       = Left $ MissingArgument "tape"
+argP ("--tape":ss)   = Left $ MissingArgument "tape"
+
+argP ("-I":n:ss)           = (,ss) <$> iterationsP n
+argP ("--iterations":n:ss) = (,ss) <$> iterationsP n
+argP ("-I":ss)             = Left $ MissingArgument "iterations"
+argP ("--iterations":ss)   = Left $ MissingArgument "iterations"
+
+argP (s:ss) = Left $ UnknownArgument s
+
+iterationsP :: String -> Either ArgError Arg
+iterationsP s = case readMaybe s of
+    Just n  | n > 0     -> Right $ Iterations n
+            | otherwise -> Left $ InvalidIteration s
+    Nothing -> Left $ InvalidIteration s
+
+
+data Args = Args {
+        argHelp    :: Bool,
+        file       :: Maybe String,
+        tapeFile   :: Maybe String,
+        iterations :: Int
+    }
+
+args :: [String] -> Either ArgError Args
+args ss = (\as -> Args {
+        argHelp    = Help `elem` as,
+        file       = fst $ findMap (\case
+            File s -> Just s
+            _      -> Nothing) as,
+        tapeFile   = fst $ findMap (\case
+            TapeFile s -> Just s
+            _          -> Nothing) as,
+        iterations = fromMaybe (2^10) $ fst $ findMap (\case
+            Iterations n -> Just n
+            _            -> Nothing) as
+    }) <$> args' [] ss
+
+
+args' :: [Arg] -> [String] -> Either ArgError [Arg]
+args' as [] = Right as
+args' as ss = argP ss >>= (\(a, ss') -> args' (a:as) ss')
+
+help progName = [
+        "Usage: ", progName, " [OPTIONS]\n\n",
+        "Options:\n",
+        "  -i, --input   <FILENAME>  The file path to the turing machines source, this disables reading from stdin\n",
+        "  -t, --tape    <FILENAME>  The file path to the turing machines input tape, the default is the blank tape\n",
+        "  -I, --iterations <COUNT>  The number of iterations to run before erroring out, default 2^20\n",
+        "  -h, --help                Print help command\n"
+    ]
+
+showHelp :: IO ()
+showHelp = do
+    progName <- getProgName
+    mapM_ putStr (help progName)
+
+showArgError :: ArgError -> IO a
+showArgError err = do
+    case err of
+        UnknownArgument  arg -> putStr "Error: unknown argument: " *> print arg
+        MissingArgument  arg -> putStr "Error: missing positional argument for " *> putStr arg
+        InvalidIteration n   -> putStr "Error: invalid iteration count: " *> print n
+
+    putStrLn ""
+    showHelp
+    exitFailure
+
 main = do
-    content <- getContents
+    rawArgs  <- getArgs
+    arguments <- case args rawArgs of
+        Left err   -> showArgError err
+        Right args -> pure args
+
+    when (argHelp arguments) $ showHelp *> exitSuccess
+    content <- maybe getContents readFile (file arguments)
+    tape    <- maybe (pure blankTape) (fmap (Tape [] . map Symbol . concatMap words . lines) . readFile) (tapeFile arguments)
+
     case (statements `chain` tm) content of
         Left  (Left err)  -> putStr "Error: " *> print err *> exitFailure
         Left  (Right err) -> putStr "Error: " *> print err *> exitFailure
-        Right (tm, _)     -> print $ snd (run tm blankTape 10000000)
+        Right (tm, _)     -> print $ snd (run tm blankTape (iterations arguments))
