@@ -6,6 +6,7 @@ import Data.Char(isAlphaNum)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.List (find)
+import System.Exit
 
 data Shift = L | R deriving(Show)
 data TuringMachine state symbol = TuringMachine {
@@ -19,7 +20,8 @@ data TuringMachine state symbol = TuringMachine {
 data Tape symbol = Tape [symbol] [symbol]
 
 instance Show symbol => Show (Tape symbol) where
-    show (Tape ps ns) = show (reverse ps ++ ns)
+    show (Tape [] []) = "[]"
+    show (Tape ps ns) = foldl1 (\a b -> a ++ (' ':b)) $ map show (reverse ps ++ ns)
 
 blankTape :: Tape symbol
 blankTape = Tape [] []
@@ -202,7 +204,11 @@ alphaNum :: Parser Char String
 alphaNum = predicateString isAlphaNum
 
 newtype State = State String deriving(Show, Eq, Ord)
-newtype Symbol = Symbol String deriving(Show, Eq, Ord)
+newtype Symbol = Symbol String deriving(Eq, Ord)
+
+instance Show Symbol where
+    show (Symbol s) = s
+
 data Statement
     = States     [State]
     | Alphabet   [Symbol]
@@ -391,5 +397,7 @@ findMap f (x:xs) = case f x of
 
 main = do
     content <- getContents
-    let t = (statements `chain` tm) content
-    print $ right (\(t, _) -> snd (run t blankTape 10000000)) t
+    case (statements `chain` tm) content of
+        Left  (Left err)  -> putStr "Error: " *> print err *> exitFailure
+        Left  (Right err) -> putStr "Error: " *> print err *> exitFailure
+        Right (tm, _)     -> print $ snd (run tm blankTape 10000000)
