@@ -4,7 +4,8 @@ import Control.Arrow
 import Control.Monad(void)
 import Data.Char(isAlphaNum)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
+import Data.List (find)
 
 data Shift = L | R deriving(Show)
 data TuringMachine state symbol = TuringMachine {
@@ -68,6 +69,8 @@ data Error i
   | Expected i i
   | ExpectedSymbol i
   | EarlyEndOfInput [i]
+  | UnknownState State
+  | UnknownSymbol Symbol
   | Redefinition String
   | Missing String
   | Empty
@@ -302,23 +305,27 @@ tm = do
         Alphabet alphabet -> Just alphabet
         _                 -> Nothing
 
-    blank  <- tm'' $ \case
-        Blank blank -> Just blank
-        _            -> Nothing
+    blank <- andThen (typeCheckOpt UnknownSymbol alphabet)
+        $ tm'' $ \case
+            Blank blank -> Just blank
+            _            -> Nothing
 
-    input <- tm' "input" $ \case
-        Input input -> Just input
-        _           -> Nothing
+    input <- andThen (typeCheck UnknownSymbol alphabet)
+        $ tm' "input" $ \case
+            Input input -> Just input
+            _           -> Nothing
 
-    initial  <- tm'' $ \case
-        Initial initial -> Just initial
-        _               -> Nothing
+    initial <- andThen (typeCheckOpt UnknownState states)
+        $ tm'' $ \case
+            Initial initial -> Just initial
+            _               -> Nothing
 
-    accepting <- tm' "accepting" $ \case
-        Accepting accepting -> Just accepting
-        _                   -> Nothing
+    accepting <- andThen (typeCheck UnknownState states)
+        $ tm' "accepting" $ \case
+            Accepting accepting -> Just accepting
+            _                   -> Nothing
 
-    transitions <- tmTransitions
+    transitions <- tmTransitions states alphabet
 
     return TuringMachine {
             state      = fromMaybe (head states) initial,
@@ -328,6 +335,12 @@ tm = do
             transition = curry (`Map.lookup` transitions)
         }
 
+andThen :: (b -> Either (Error a) c) -> Parser a b -> Parser a c
+andThen f (Parser p) = Parser $ g . p
+    where
+        g (Right (x, s)) = right (,s) $ f x
+        g (Left e)       = Left e
+
 tm' :: String -> (a -> Maybe b) -> Parser a b
 tm' s f = Parser $ \input -> case findMap f input of
     (Just x, input') -> Right (x, input')
@@ -336,24 +349,39 @@ tm' s f = Parser $ \input -> case findMap f input of
 tm'' :: (a -> Maybe b) -> Parser a (Maybe b)
 tm'' f = Parser $ Right . findMap f
 
-tmTransitions :: Parser Statement (Map.Map (State, Symbol) (State, Symbol, Shift))
-tmTransitions = Parser $ \input -> case list' tmTransition input of
-        (xs, [])    -> Right (Map.fromList xs, [])
-        (_, input') -> Left $ l (runParser tmTransition input')
+typeCheck :: Eq a => (a -> Error Statement) -> [a] -> [a] -> Either (Error Statement) [a]
+typeCheck e xs ys = case find (`notElem` xs) ys of
+    Just x  -> Left $ e x
+    Nothing -> Right ys
+
+typeCheckOpt :: Eq a => (a -> Error Statement) -> [a] -> Maybe a -> Either (Error Statement) (Maybe a)
+typeCheckOpt _ _  Nothing  = Right Nothing
+typeCheckOpt e xs (Just y) = if y `elem` xs then Right (Just y) else Left $ e y
+
+tmTransitions :: [State] -> [Symbol] -> Parser Statement (Map.Map (State, Symbol) (State, Symbol, Shift))
+tmTransitions states alphabet = Parser $ \input -> case list' (tmTransition states alphabet) input of
+        (xs, [])    -> let m = Map.fromList xs in
+            if Map.size m == length xs
+                then Right (m, [])
+                else Left $ Redefinition "the same transition may not be defined more than once"
+        (_, input') -> Left $ l (runParser (tmTransition states alphabet) input')
     where
         l (Left a) = a
 
-tmTransition :: Parser Statement ((State, Symbol), (State, Symbol, Shift))
-tmTransition = Parser f
+tmTransition :: [State] -> [Symbol] -> Parser Statement ((State, Symbol), (State, Symbol, Shift))
+tmTransition states alphabet = Parser f
     where
-        f (Transition i o : s) = Right ((i, o), s)
-        f (States _       : _) = Left $ Redefinition "states"
-        f (Alphabet _     : _) = Left $ Redefinition "alphabet"
-        f (Blank _        : _) = Left $ Redefinition "blank"
-        f (Input _        : _) = Left $ Redefinition "input"
-        f (Initial _      : _) = Left $ Redefinition "initial"
-        f (Accepting _    : _) = Left $ Redefinition "accepting"
-        f [                  ] = Left Empty
+        f :: [Statement] -> Either (Error Statement) (((State, Symbol), (State, Symbol, Shift)), [Statement])
+        f (Transition (s, sym) (s', sym', lr) : rest) = (((s, sym), (s', sym', lr)), rest)
+            <$ typeCheck UnknownState  states [s, s']
+            <* typeCheck UnknownSymbol alphabet [sym, sym']
+        f (States _    : _) = Left $ Redefinition "states"
+        f (Alphabet _  : _) = Left $ Redefinition "alphabet"
+        f (Blank _     : _) = Left $ Redefinition "blank"
+        f (Input _     : _) = Left $ Redefinition "input"
+        f (Initial _   : _) = Left $ Redefinition "initial"
+        f (Accepting _ : _) = Left $ Redefinition "accepting"
+        f [               ] = Left Empty
 
 findMap :: (a -> Maybe b) -> [a] -> (Maybe b, [a])
 findMap _ [] = (Nothing, [])
